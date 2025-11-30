@@ -7,4 +7,6 @@ yoomoney
 python-dotenv
 apscheduler
 loguru
-toncenter-py
+pytonlib
+psycopg2
+psycopg2-binary
