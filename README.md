@@ -1,2 +1,0 @@
-# HunterBot
-HunterBot
