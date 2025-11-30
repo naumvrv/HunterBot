@@ -1,0 +1,10 @@
+aiogram
+SQLAlchemy
+asyncpg
+aiohttp
+tonsdk
+yoomoney
+python-dotenv
+apscheduler
+loguru
+toncenter-py
