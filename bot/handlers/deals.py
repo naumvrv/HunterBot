@@ -7,7 +7,9 @@ from database.db import AsyncSessionLocal
 from database.models import Deal, User
 from escrow.yoomoney import create_payment, check_payment
 from escrow.ton_wallet import BOT_WALLET_ADDRESS
+from escrow.manager import refund_deal
 from bot.states import DealStates
+from bot.utils.logging_setup import log_deal_created, log_deal_status_changed, log_payment_received
 from datetime import datetime, timedelta
 from loguru import logger
 import re
@@ -83,7 +85,7 @@ async def start_deal(message: Message):
         )
 
 @router.callback_query(F.data.startswith("paid_"))
-async def user_paid(callback: CallbackQuery):
+async def user_paid(callback: CallbackQuery, state: FSMContext):
     deal_id = int(callback.data.split("_")[1])
     
     async with AsyncSessionLocal() as db:
@@ -95,19 +97,19 @@ async def user_paid(callback: CallbackQuery):
         await callback.message.edit_text("🔄 Проверяю оплату...")
         
         if check_payment(deal.yoomoney_payment_id):
-            deal.status = "waiting_ton"
-            deal.expires_at = datetime.utcnow() + timedelta(minutes=30)
+            deal.status = "waiting_ton_address"
             await db.commit()
             
             await callback.message.edit_text(
                 f"✅ <b>ОПЛАТА ПОЛУЧЕНА!</b>\n\n"
-                f"📱 Попроси продавца перевести <b>{deal.ton_amount} TON</b>\n"
-                f"💼 На кошелёк бота:\n"
-                f"<code>{BOT_WALLET_ADDRESS}</code>\n\n"
-                f"⏰ Время на сделку: <b>30 минут</b>\n"
-                f"📊 Статус: /status_{deal.id}",
+                f"📱 Теперь отправь свой TON-адрес для получения криптовалюты\n"
+                f"Пример: <code>EQAbc...xyz123</code>",
                 parse_mode="HTML"
             )
+            
+            # Сохраняем deal_id в состояние
+            await state.set_state(DealStates.waiting_for_ton_address)
+            await state.update_data(deal_id=deal.id)
             await callback.answer()
         else:
             await callback.answer("⏳ Платёж ещё не прошёл. Подожди 10–30 секунд.", show_alert=True)
@@ -139,12 +141,17 @@ async def get_ton_address(message: Message, state: FSMContext):
             return
             
         deal.buyer_ton_address = address
+        deal.status = "waiting_ton"
+        deal.expires_at = datetime.utcnow() + timedelta(minutes=30)
         await db.commit()
 
     await message.answer(
         f"✅ <b>Адрес сохранён!</b>\n\n"
         f"💼 TON-адрес: <code>{address}</code>\n\n"
-        f"⏰ Ждём {deal.ton_amount} TON от продавца\n"
+        f"📱 Теперь попроси продавца перевести <b>{deal.ton_amount} TON</b>\n"
+        f"💼 На кошелёк бота:\n"
+        f"<code>{BOT_WALLET_ADDRESS}</code>\n\n"
+        f"⏰ Время на сделку: <b>30 минут</b>\n"
         f"📊 Статус: /status_{deal.id}",
         parse_mode="HTML"
     )
@@ -175,3 +182,111 @@ async def deal_status(message: Message):
                     f"📊 Статус: <b>{deal.status}</b>",
                     parse_mode="HTML"
                 )
+            else:
+                await message.answer("❌ Сделка не найдена")
+
+@router.callback_query(F.data.startswith("cancel_"))
+async def cancel_deal(callback: CallbackQuery):
+    """Обработка отмены сделки"""
+    deal_id = int(callback.data.split("_")[1])
+    
+    async with AsyncSessionLocal() as db:
+        deal = await db.get(Deal, deal_id)
+        
+        if not deal:
+            await callback.answer("❌ Сделка не найдена", show_alert=True)
+            return
+        
+        if deal.user_id != callback.from_user.id:
+            await callback.answer("❌ Это не ваша сделка", show_alert=True)
+            return
+        
+        # Проверяем, можно ли отменить сделку
+        if deal.status == "completed":
+            await callback.answer("❌ Нельзя отменить завершённую сделку", show_alert=True)
+            return
+        
+        if deal.status == "refunded" or deal.status == "cancelled":
+            await callback.answer("❌ Сделка уже отменена", show_alert=True)
+            return
+        
+        old_status = deal.status
+        
+        # Если была оплата - возвращаем деньги
+        if deal.status in ["waiting_payment", "waiting_ton_address", "waiting_ton"]:
+            if deal.yoomoney_payment_id and deal.yoomoney_payment_id != "":
+                # Пытаемся вернуть деньги
+                refund_success = await refund_deal(deal.id, deal.price_rub + (deal.price_rub * 0.019))
+                if refund_success:
+                    deal.status = "refunded"
+                    await callback.message.edit_text(
+                        f"✅ <b>Сделка #{deal.id} отменена</b>\n\n"
+                        f"💸 Деньги будут возвращены в течение 5-10 минут\n"
+                        f"💰 Сумма: {deal.price_rub + (deal.price_rub * 0.019):,.0f} ₽",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await callback.answer(
+                        "⚠️ Ошибка возврата средств. Обратитесь к администратору.", 
+                        show_alert=True
+                    )
+                    logger.error(f"Не удалось вернуть средства по сделке {deal.id}")
+                    return
+            else:
+                deal.status = "cancelled"
+                await callback.message.edit_text(
+                    f"✅ <b>Сделка #{deal.id} отменена</b>\n\n"
+                    f"Оплата не была произведена",
+                    parse_mode="HTML"
+                )
+        else:
+            deal.status = "cancelled"
+            await callback.message.edit_text(
+                f"✅ <b>Сделка #{deal.id} отменена</b>",
+                parse_mode="HTML"
+            )
+        
+        log_deal_status_changed(deal.id, old_status, deal.status)
+        await db.commit()
+        await callback.answer()
+
+@router.message(F.text == "🔍 Мои сделки")
+async def my_deals(message: Message):
+    """Показывает список сделок пользователя"""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            "SELECT id, ton_amount, price_rub, status, created_at FROM deals "
+            "WHERE user_id = :user_id ORDER BY created_at DESC LIMIT 10",
+            {"user_id": message.from_user.id}
+        )
+        deals = result.fetchall()
+        
+        if not deals:
+            await message.answer("📭 У вас пока нет сделок")
+            return
+        
+        text = "🔍 <b>Ваши последние сделки:</b>\n\n"
+        
+        status_emoji = {
+            "new": "🆕",
+            "waiting_payment": "💳",
+            "waiting_ton_address": "📝", 
+            "waiting_ton": "⏳",
+            "completed": "✅",
+            "timeout": "⏰",
+            "refunded": "💸",
+            "cancelled": "❌"
+        }
+        
+        for deal_id, ton_amount, price_rub, status, created_at in deals:
+            emoji = status_emoji.get(status, "❓")
+            date_str = created_at.strftime("%d.%m %H:%M")
+            
+            text += (
+                f"{emoji} <b>Сделка #{deal_id}</b>\n"
+                f"  📦 {ton_amount} TON за {price_rub:,.0f}₽\n"
+                f"  📊 {status} | {date_str}\n"
+                f"  /status_{deal_id}\n\n"
+            )
+        
+        await message.answer(text, parse_mode="HTML")

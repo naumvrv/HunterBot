@@ -14,8 +14,9 @@ def create_payment(amount: float, deal_id: int) -> dict:
         return {"url": "", "payment_id": f"error_{deal_id}"}
         
     try:
+        from config import YOOMONEY_WALLET
         payment = client.create_payment(
-            to=YOOKMONEY_WALLET,  # Используй кошелек из .env
+            to=YOOMONEY_WALLET,  # Используй кошелек из .env
             amount=amount,
             label=f"deal_{deal_id}",
             quickpay_form="shop",

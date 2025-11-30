@@ -5,6 +5,7 @@ from loguru import logger
 from database.models import Deal, User
 from database.db import AsyncSessionLocal
 from parser.ton_price import get_ton_price_rub
+from scam_check.checker import analyze_text_for_scam, get_scam_check_report
 from aiogram import Bot
 from datetime import datetime, timezone
 
@@ -67,6 +68,12 @@ async def parse_avito_once(bot: Bot):
 
                             if profit_percent < 4.0:
                                 continue
+                            
+                            # Проверка на мошенничество
+                            is_suspicious, risk_score, flags = analyze_text_for_scam(title)
+                            if risk_score > 70:
+                                logger.warning(f"Пропускаем подозрительное объявление (риск {risk_score}%): {title}")
+                                continue
 
                             # Проверяем уникальность
                             full_url = f"https://www.avito.ru{item_url}"
@@ -93,6 +100,14 @@ async def parse_avito_once(bot: Bot):
                                 # Рассылка
                                 users_result = await db.execute("SELECT id FROM users")
                                 user_ids = [row[0] for row in users_result.fetchall()]
+                                
+                                # Генерируем отчет безопасности
+                                scam_report = get_scam_check_report(
+                                    "Avito Seller",
+                                    title,
+                                    price_per_ton,
+                                    market_price
+                                )
 
                                 deal_text = (
                                     f"🔥 <b>ВЫГОДНАЯ СДЕЛКА!</b> Экономия <b>{profit_percent:.1f}%</b>\n\n"
@@ -100,6 +115,7 @@ async def parse_avito_once(bot: Bot):
                                     f"💰 Цена: <b>{price_rub:,.0f} ₽</b>\n"
                                     f"📈 За 1 TON: <b>{price_per_ton:.0f} ₽</b>\n"
                                     f"💎 Рынок: <b>{market_price:.0f} ₽</b>\n\n"
+                                    f"{scam_report}\n\n"
                                     f"🛒 <b>Купить через гарант:</b> <code>/deal_{new_deal.id}</code>\n"
                                     f"🔗 <a href='{full_url}'>Перейти на Avito</a>"
                                 )
@@ -126,7 +142,5 @@ async def parse_avito_once(bot: Bot):
         logger.error(f"Критическая ошибка парсера Avito: {e}")
 
 async def start_avito_parser(bot: Bot):
-    """Запускает бесконечный парсинг"""
-    while True:
-        await parse_avito_once(bot)
-        await asyncio.sleep(180)  # 3 минуты
+    """Вызывается планировщиком каждые 3 минуты"""
+    await parse_avito_once(bot)

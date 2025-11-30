@@ -1,0 +1,48 @@
+# Игнорировать виртуальное окружение
+venv/
+env/
+ENV/
+.venv
+
+# Игнорировать конфигурацию
+.env
+*.env
+.env.local
+
+# Игнорировать кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Игнорировать логи
+logs/
+*.log
+
+# Игнорировать базу данных SQLite (если используется)
+*.db
+*.sqlite
+*.sqlite3
+
+# Игнорировать IDE настройки
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Игнорировать keystore для TON
+keystore/
+
+# Игнорировать временные файлы
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Игнорировать файлы сборки
+build/
+dist/
+*.egg-info/
+

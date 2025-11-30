@@ -4,15 +4,20 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from loguru import logger
 from config import BOT_TOKEN
+from bot.utils.error_handler import validate_env_variables, handle_errors
+from bot.utils.logging_setup import setup_logging
 from database.db import engine, Base
 from parser.avito_parser import start_avito_parser
+from parser.yula_parser import start_yula_parser
 from escrow.monitor import check_incoming_ton
 from bot.handlers.admin import router as admin_router
 from bot.handlers.deals import router as deals_router
 from bot.handlers.premium import router as premium_router
+from bot.handlers.setting import router as setting_router
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Настройка логирования
+setup_logging()
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
@@ -22,6 +27,13 @@ dp = Dispatcher(storage=storage)
 async def on_startup():
     logger.info("🚀 NaumHunterBot запускается...")
     
+    # Проверка переменных окружения
+    try:
+        validate_env_variables()
+    except ValueError as e:
+        logger.critical(f"❌ Ошибка конфигурации:\n{e}")
+        raise
+    
     # Создание таблиц БД
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -30,8 +42,10 @@ async def on_startup():
     # Планировщик парсинга
     scheduler = AsyncIOScheduler()
     scheduler.add_job(start_avito_parser, "interval", minutes=3, args=[bot])
+    scheduler.add_job(start_yula_parser, "interval", minutes=5, args=[bot])
     scheduler.start()
     logger.info("✅ Парсер Avito запущен (каждые 3 мин)")
+    logger.info("✅ Парсер Юлы запущен (каждые 5 мин)")
     
     # Мониторинг TON
     asyncio.create_task(check_incoming_ton(bot))
@@ -44,6 +58,7 @@ async def main():
     dp.include_router(deals_router)
     dp.include_router(admin_router)
     dp.include_router(premium_router)
+    dp.include_router(setting_router)
     
     await on_startup()
     await dp.start_polling(bot)

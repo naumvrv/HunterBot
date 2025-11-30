@@ -1,34 +1,31 @@
 import asyncio
-from pytonlib import TonlibClient
 from database.db import AsyncSessionLocal
 from database.models import Deal
-from escrow.ton_wallet import send_ton
+from escrow.ton_wallet import send_ton, get_ton_client, close_ton_client, BOT_WALLET_ADDRESS
 from loguru import logger
 from config import TONCENTER_API_KEY  # Не используется, но для совместимости
 from datetime import datetime, timezone
-import requests
-from pathlib import Path
-
-# Инициализация TonlibClient (один раз)
-ton_config = requests.get('https://ton.org/global.config.json').json()
-keystore_dir = Path('./keystore')
-keystore_dir.mkdir(exist_ok=True)
-
-client = TonlibClient(
-    config=ton_config,
-    keystore=str(keystore_dir),
-    ls_index=0  # LiteServer index
-)
 
 async def check_incoming_ton(bot):
     """Мониторит входящие TON каждые 15 секунд с pytonlib"""
-    await client.init()  # Инициализация tonlib
+    client = await get_ton_client()
+    if not client:
+        logger.error("❌ Не удалось инициализировать TON client для мониторинга")
+        return
+    
     logger.info("🔍 TonlibClient запущен для мониторинга")
     
-    while True:
+    try:
+        while True:
         try:
             # Получаем транзакции для BOT_WALLET_ADDRESS (из ton_wallet)
             from escrow.ton_wallet import BOT_WALLET_ADDRESS
+            
+            if BOT_WALLET_ADDRESS.startswith("EQ_ERROR"):
+                logger.warning("⚠️ TON wallet недоступен, мониторинг пропущен")
+                await asyncio.sleep(60)
+                continue
+            
             transactions = await client.get_transactions(
                 address=BOT_WALLET_ADDRESS,
                 limit=30
@@ -69,16 +66,18 @@ async def check_incoming_ton(bot):
                                 )
                                 logger.success(f"Сделка {deal_id} завершена: +{commission_ton:.3f} TON")
                                 break
-            
-            # Автоотмена
-            await db.execute(
-                "UPDATE deals SET status = 'timeout' WHERE status = 'waiting_ton' AND expires_at < NOW()"
-            )
-            await db.commit()
+                
+                # Автоотмена
+                await db.execute(
+                    "UPDATE deals SET status = 'timeout' WHERE status = 'waiting_ton' AND expires_at < NOW()"
+                )
+                await db.commit()
             
         except Exception as e:
             logger.error(f"❌ Ошибка мониторинга TON: {e}")
         
         await asyncio.sleep(15)
-    
-    await client.close()
+    except KeyboardInterrupt:
+        logger.info("Мониторинг TON остановлен")
+    finally:
+        await close_ton_client()
